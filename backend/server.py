@@ -2210,7 +2210,7 @@ app.include_router(api_router)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     TrustedHostMiddleware, 
-    allowed_hosts=["localhost", "127.0.0.1", "*.agricultural-ai.com", "*.vercel.app"]
+    allowed_hosts=["localhost", "127.0.0.1", "*.agricultural-ai.com", "*.vercel.app", "*.onrender.com" ]
 )
 
 app.add_middleware(
