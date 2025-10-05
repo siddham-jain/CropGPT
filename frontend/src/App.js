@@ -4,6 +4,8 @@ import '@/App.css';
 import ChatInterface from './components/ChatInterface';
 import AuthPage from './components/AuthPage';
 import AccountDetails from './components/AccountDetails';
+import SchemesPage from './components/SchemesPage';
+import MarketplacePage from './components/MarketplacePage';
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -73,6 +75,26 @@ function App() {
             element={
               isAuthenticated ? (
                 <AccountDetails user={user} onLogout={handleLogout} />
+              ) : (
+                <Navigate to="/auth" replace />
+              )
+            }
+          />
+          <Route
+            path="/schemes"
+            element={
+              isAuthenticated ? (
+                <SchemesPage user={user} onLogout={handleLogout} />
+              ) : (
+                <Navigate to="/auth" replace />
+              )
+            }
+          />
+          <Route
+            path="/market"
+            element={
+              isAuthenticated ? (
+                <MarketplacePage user={user} onLogout={handleLogout} />
               ) : (
                 <Navigate to="/auth" replace />
               )

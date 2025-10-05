@@ -18,19 +18,24 @@ function ChatInterface({ user, onLogout }) {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [languageSelectorOpen, setLanguageSelectorOpen] = useState(false);
   const [uiLanguage, setUiLanguage] = useState('en');
-  
+
   // Voice interface state
   const [isRecording, setIsRecording] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [voiceLanguage, setVoiceLanguage] = useState('en');
-  
+
   // UX Enhancement states
   const [error, setError] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('connected');
   const [typingIndicator, setTypingIndicator] = useState('');
   const [retryCount, setRetryCount] = useState(0);
-  
+
+  // Media attachment state
+  const [isUploadingMedia, setIsUploadingMedia] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [selectedFile, setSelectedFile] = useState(null);
+
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const profileMenuRef = useRef(null);
@@ -38,6 +43,7 @@ function ChatInterface({ user, onLogout }) {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const currentAudioRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   const t = useTranslation(uiLanguage);
 
@@ -53,14 +59,14 @@ function ChatInterface({ user, onLogout }) {
     // Load UI language from localStorage
     const savedLanguage = localStorage.getItem('uiLanguage') || 'en';
     setUiLanguage(savedLanguage);
-    
+
     // Load voice language from localStorage
     const savedVoiceLanguage = localStorage.getItem('voiceLanguage') || 'en';
     setVoiceLanguage(savedVoiceLanguage);
-    
+
     // Check voice support
     checkVoiceSupport();
-    
+
     loadConversations();
     loadChatHistory();
   }, []);
@@ -77,20 +83,20 @@ function ChatInterface({ user, onLogout }) {
     };
 
     document.addEventListener('mousedown', handleClickOutside);
-    
+
     // Online/offline detection for mobile
     const handleOnline = () => {
       console.log('Connection restored');
       processOfflineVoiceRecordings();
     };
-    
+
     const handleOffline = () => {
       console.log('Connection lost');
     };
-    
+
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-    
+
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       window.removeEventListener('online', handleOnline);
@@ -102,23 +108,22 @@ function ChatInterface({ user, onLogout }) {
     try {
       const offlineRecordings = JSON.parse(localStorage.getItem('offlineVoiceRecordings') || '[]');
       const unprocessedRecordings = offlineRecordings.filter(r => !r.processed);
-      
+
       if (unprocessedRecordings.length === 0) return;
-      
+
       console.log(`Processing ${unprocessedRecordings.length} offline voice recordings`);
-      
+
       for (const recording of unprocessedRecordings) {
         try {
           // Extract base64 audio data
           const base64Audio = recording.audio.split(',')[1];
-          
+
           const token = localStorage.getItem('token');
           const response = await axios.post(
-            `${API}/voice/chat`,
+            `${API}/voice/transcribe`,
             {
               audio_data: base64Audio,
-              language: recording.language,
-              conversation_id: currentConversationId,
+              // Language is auto-detected by Deepgram Nova-2
             },
             {
               headers: {
@@ -128,42 +133,26 @@ function ChatInterface({ user, onLogout }) {
             }
           );
 
-          // Add processed messages
-          const userMessage = {
-            id: Date.now().toString() + Math.random(),
-            content: `🎤 ${response.data.message} (processed from offline)`,
-            role: 'user',
-            language: response.data.language,
-            created_at: recording.timestamp,
-            isVoice: true,
-            wasOffline: true,
-          };
+          // Append transcribed text from offline recording to existing input
+          if (response.data.success && response.data.text) {
+            setInputMessage((prevMessage) => {
+              const separator = prevMessage.trim() ? ' ' : '';
+              return prevMessage + separator + response.data.text + ' (from offline recording)';
+            });
+            textareaRef.current?.focus();
+          }
 
-          const assistantMessage = {
-            id: Date.now().toString() + Math.random() + '-assistant',
-            content: response.data.message,
-            role: 'assistant',
-            language: response.data.language,
-            tools_used: response.data.tools_used,
-            created_at: new Date().toISOString(),
-            audioFile: response.data.audio_file,
-            audioDuration: response.data.audio_duration,
-            isVoice: true,
-          };
-
-          setMessages((prev) => [...prev, userMessage, assistantMessage]);
-          
           // Mark as processed
           recording.processed = true;
-          
+
         } catch (err) {
           console.error('Failed to process offline recording:', err);
         }
       }
-      
+
       // Update localStorage with processed recordings
       localStorage.setItem('offlineVoiceRecordings', JSON.stringify(offlineRecordings));
-      
+
     } catch (err) {
       console.error('Error processing offline recordings:', err);
     }
@@ -184,7 +173,7 @@ function ChatInterface({ user, onLogout }) {
   const loadChatHistory = async (conversationId = null) => {
     try {
       const token = localStorage.getItem('token');
-      const url = conversationId 
+      const url = conversationId
         ? `${API}/chat/history?conversation_id=${conversationId}`
         : `${API}/chat/history`;
       const response = await axios.get(url, {
@@ -224,7 +213,7 @@ function ChatInterface({ user, onLogout }) {
 
   const handleDeleteConversation = async (conversationId, e) => {
     e.stopPropagation(); // Prevent conversation selection when clicking delete
-    
+
     if (!window.confirm('Are you sure you want to delete this conversation?')) {
       return;
     }
@@ -234,12 +223,12 @@ function ChatInterface({ user, onLogout }) {
       await axios.delete(`${API}/conversations/${conversationId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      
+
       // If we're currently viewing the deleted conversation, switch to new chat
       if (currentConversationId === conversationId) {
         handleNewChat();
       }
-      
+
       // Reload conversations list
       loadConversations();
     } catch (err) {
@@ -250,10 +239,17 @@ function ChatInterface({ user, onLogout }) {
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
-    if (!inputMessage.trim() || loading) return;
+    if ((!inputMessage.trim() && !selectedFile) || loading) return;
 
     const userMessage = inputMessage.trim();
     setInputMessage('');
+
+    // If there's a file, upload it first
+    if (selectedFile) {
+      await uploadAndAnalyzeMedia(selectedFile, userMessage);
+      setSelectedFile(null);
+      return;
+    }
 
     // Add user message to UI
     const newUserMessage = {
@@ -270,7 +266,7 @@ function ChatInterface({ user, onLogout }) {
 
     try {
       const token = localStorage.getItem('token');
-      
+
       // Build conversation history
       const conversationHistory = messages.slice(-6).map(msg => ({
         role: msg.role,
@@ -302,7 +298,7 @@ function ChatInterface({ user, onLogout }) {
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, assistantMessage]);
-      
+
       // Update conversation ID if it's a new conversation
       if (!currentConversationId && response.data.conversation_id) {
         setCurrentConversationId(response.data.conversation_id);
@@ -312,10 +308,10 @@ function ChatInterface({ user, onLogout }) {
       console.error('Failed to send message:', err);
       setError(err.message);
       setRetryCount(prev => prev + 1);
-      
+
       // Enhanced error messages based on error type
       let errorContent = 'Sorry, I encountered an error. Please try again.';
-      
+
       if (err.response?.status === 401) {
         errorContent = 'Your session has expired. Please log in again.';
         setTimeout(() => onLogout(), 2000);
@@ -328,7 +324,7 @@ function ChatInterface({ user, onLogout }) {
         errorContent = 'Network connection lost. Please check your internet connection.';
         setConnectionStatus('disconnected');
       }
-      
+
       const errorMessage = {
         id: Date.now().toString() + '-error',
         content: errorContent,
@@ -338,7 +334,7 @@ function ChatInterface({ user, onLogout }) {
         isError: true,
       };
       setMessages((prev) => [...prev, errorMessage]);
-      
+
       // Auto-retry for network errors (max 3 times)
       if (retryCount < 3 && (err.code === 'NETWORK_ERROR' || err.response?.status >= 500)) {
         setTimeout(() => {
@@ -376,28 +372,28 @@ function ChatInterface({ user, onLogout }) {
       const hasMediaRecorder = 'MediaRecorder' in window;
       const hasGetUserMedia = 'getUserMedia' in navigator.mediaDevices;
       const hasAudioContext = 'AudioContext' in window || 'webkitAudioContext' in window;
-      
+
       // Enhanced mobile support check
       const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
       const supportsTouch = 'ontouchstart' in window;
-      
+
       setVoiceSupported(hasMediaRecorder && hasGetUserMedia && hasAudioContext);
-      
+
       // Check backend voice capabilities
       const token = localStorage.getItem('token');
       const response = await axios.get(`${API}/voice/capabilities`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      
+
       console.log('Voice capabilities:', response.data);
       console.log('Mobile device detected:', isMobile);
       console.log('Touch support:', supportsTouch);
-      
+
       // Initialize offline voice cache for mobile
       if (isMobile && 'serviceWorker' in navigator) {
         initializeOfflineVoiceCache();
       }
-      
+
     } catch (err) {
       console.error('Voice support check failed:', err);
       setVoiceSupported(false);
@@ -412,21 +408,22 @@ function ChatInterface({ user, onLogout }) {
         "Voice recording saved. I'll process it when connection is restored.",
         "Welcome to the agricultural assistant. How can I help you today?"
       ];
-      
+
       // Store in localStorage for offline access
       localStorage.setItem('offlineVoiceResponses', JSON.stringify(commonResponses));
       console.log('Offline voice cache initialized');
-      
+
     } catch (err) {
       console.error('Failed to initialize offline cache:', err);
     }
   };
 
   const startRecording = async () => {
+    console.log('Starting recording...');
     try {
       // Enhanced mobile audio constraints
       const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-      
+
       const audioConstraints = {
         echoCancellation: true,
         noiseSuppression: true,
@@ -434,57 +431,57 @@ function ChatInterface({ user, onLogout }) {
         sampleRate: isMobile ? 22050 : 44100, // Lower sample rate for mobile
         channelCount: 1 // Mono for better mobile performance
       };
-      
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-      
+
       audioChunksRef.current = [];
-      
+
       // Use compatible MIME type for mobile
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/mp4')
-        ? 'audio/mp4'
-        : 'audio/webm';
-      
+          ? 'audio/mp4'
+          : 'audio/webm';
+
       mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
-      
+
       mediaRecorderRef.current.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
-      
+
       mediaRecorderRef.current.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-        
+
         // Check if online before processing
         if (navigator.onLine) {
           await processVoiceInput(audioBlob);
         } else {
           await handleOfflineVoiceInput(audioBlob);
         }
-        
+
         // Stop all tracks to release microphone
         stream.getTracks().forEach(track => track.stop());
       };
-      
+
       mediaRecorderRef.current.start();
       setIsRecording(true);
-      
+
       // Add haptic feedback for mobile
       if (isMobile && 'vibrate' in navigator) {
         navigator.vibrate(50); // Short vibration to indicate recording started
       }
-      
+
     } catch (err) {
       console.error('Failed to start recording:', err);
-      
+
       // More user-friendly error messages for mobile
       const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-      const errorMessage = isMobile 
+      const errorMessage = isMobile
         ? 'Please allow microphone access in your browser settings and try again.'
         : 'Failed to access microphone. Please check permissions.';
-      
+
       alert(errorMessage);
     }
   };
@@ -495,19 +492,19 @@ function ChatInterface({ user, onLogout }) {
       const reader = new FileReader();
       reader.onloadend = () => {
         const base64Audio = reader.result;
-        
+
         // Store in localStorage with timestamp
         const offlineRecording = {
           audio: base64Audio,
           timestamp: new Date().toISOString(),
-          language: voiceLanguage,
-          processed: false
+          processed: false,
+          // Note: Language will be auto-detected when processed
         };
-        
+
         const existingRecordings = JSON.parse(localStorage.getItem('offlineVoiceRecordings') || '[]');
         existingRecordings.push(offlineRecording);
         localStorage.setItem('offlineVoiceRecordings', JSON.stringify(existingRecordings));
-        
+
         // Show offline message
         const offlineMessage = {
           id: Date.now().toString(),
@@ -517,12 +514,12 @@ function ChatInterface({ user, onLogout }) {
           created_at: new Date().toISOString(),
           isOffline: true,
         };
-        
+
         setMessages((prev) => [...prev, offlineMessage]);
       };
-      
+
       reader.readAsDataURL(audioBlob);
-      
+
     } catch (err) {
       console.error('Offline voice handling error:', err);
     }
@@ -538,20 +535,19 @@ function ChatInterface({ user, onLogout }) {
   const processVoiceInput = async (audioBlob) => {
     try {
       setLoading(true);
-      
+
       // Convert blob to base64
       const reader = new FileReader();
       reader.onloadend = async () => {
         const base64Audio = reader.result.split(',')[1]; // Remove data:audio/webm;base64, prefix
-        
+
         try {
           const token = localStorage.getItem('token');
           const response = await axios.post(
-            `${API}/voice/chat`,
+            `${API}/voice/transcribe`,
             {
               audio_data: base64Audio,
-              language: voiceLanguage,
-              conversation_id: currentConversationId,
+              // Language is auto-detected by Deepgram Nova-2
             },
             {
               headers: {
@@ -561,47 +557,32 @@ function ChatInterface({ user, onLogout }) {
             }
           );
 
-          // Add user message (transcribed text)
-          const userMessage = {
-            id: Date.now().toString(),
-            content: `🎤 ${response.data.message}`, // Show it was voice input
-            role: 'user',
-            language: response.data.language,
-            created_at: new Date().toISOString(),
-            isVoice: true,
-          };
-
-          // Add assistant response
-          const assistantMessage = {
-            id: Date.now().toString() + '-assistant',
-            content: response.data.message,
-            role: 'assistant',
-            language: response.data.language,
-            tools_used: response.data.tools_used,
-            created_at: new Date().toISOString(),
-            audioFile: response.data.audio_file,
-            audioDuration: response.data.audio_duration,
-            isVoice: true,
-          };
-
-          setMessages((prev) => [...prev, userMessage, assistantMessage]);
-          
-          // Play audio response if available
-          if (response.data.audio_file) {
-            playAudioResponse(response.data.audio_file);
+          // Append the transcribed text to existing input (with space if there's already text)
+          if (response.data.success && response.data.text) {
+            setInputMessage((prevMessage) => {
+              // Add space before new text if there's existing text
+              const separator = prevMessage.trim() ? ' ' : '';
+              return prevMessage + separator + response.data.text;
+            });
+            // Focus the input so user can see and edit the transcription
+            textareaRef.current?.focus();
+          } else {
+            // Show error if transcription failed
+            const errorMessage = {
+              id: Date.now().toString() + '-error',
+              content: 'Sorry, I could not transcribe your voice. Please try again or type your message.',
+              role: 'assistant',
+              language: 'en',
+              created_at: new Date().toISOString(),
+            };
+            setMessages((prev) => [...prev, errorMessage]);
           }
-          
-          // Update conversation ID if it's a new conversation
-          if (!currentConversationId && response.data.conversation_id) {
-            setCurrentConversationId(response.data.conversation_id);
-            loadConversations();
-          }
-          
+
         } catch (err) {
-          console.error('Voice processing failed:', err);
+          console.error('Voice transcription failed:', err);
           const errorMessage = {
             id: Date.now().toString() + '-error',
-            content: 'Sorry, I could not process your voice message. Please try again or type your message.',
+            content: 'Sorry, I could not transcribe your voice. Please try again or type your message.',
             role: 'assistant',
             language: 'en',
             created_at: new Date().toISOString(),
@@ -609,9 +590,9 @@ function ChatInterface({ user, onLogout }) {
           setMessages((prev) => [...prev, errorMessage]);
         }
       };
-      
+
       reader.readAsDataURL(audioBlob);
-      
+
     } catch (err) {
       console.error('Voice input processing error:', err);
     } finally {
@@ -622,30 +603,30 @@ function ChatInterface({ user, onLogout }) {
   const playAudioResponse = async (audioFile) => {
     try {
       setAudioPlaying(true);
-      
+
       // Stop any currently playing audio
       if (currentAudioRef.current) {
         currentAudioRef.current.pause();
         currentAudioRef.current = null;
       }
-      
+
       // Create audio element and play
       const audio = new Audio(audioFile);
       currentAudioRef.current = audio;
-      
+
       audio.onended = () => {
         setAudioPlaying(false);
         currentAudioRef.current = null;
       };
-      
+
       audio.onerror = () => {
         setAudioPlaying(false);
         currentAudioRef.current = null;
         console.error('Audio playback failed');
       };
-      
+
       await audio.play();
-      
+
     } catch (err) {
       console.error('Audio playback error:', err);
       setAudioPlaying(false);
@@ -665,6 +646,169 @@ function ChatInterface({ user, onLogout }) {
     localStorage.setItem('voiceLanguage', langCode);
   };
 
+  // Media attachment functions
+  const handleMediaButtonClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileSelect = (event) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    const file = files[0];
+
+    // Validate file type
+    const supportedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic'];
+    const supportedDocTypes = ['application/pdf'];
+    const allSupportedTypes = [...supportedImageTypes, ...supportedDocTypes];
+
+    if (!allSupportedTypes.includes(file.type)) {
+      alert('Unsupported file format. Please upload JPEG, PNG, WEBP, HEIC images or PDF documents.');
+      return;
+    }
+
+    // Validate file size (10MB for images, 5MB for documents)
+    const maxSize = supportedImageTypes.includes(file.type) ? 10 * 1024 * 1024 : 5 * 1024 * 1024;
+    if (file.size > maxSize) {
+      const maxSizeMB = maxSize / (1024 * 1024);
+      alert(`File too large. Maximum size: ${maxSizeMB}MB`);
+      return;
+    }
+
+    // Store the file for later upload
+    setSelectedFile(file);
+
+    // Clear the input
+    event.target.value = '';
+  };
+
+  const uploadAndAnalyzeMedia = async (file, userMessage = '') => {
+    try {
+      setIsUploadingMedia(true);
+      setUploadProgress(0);
+
+      // Add upload message to chat
+      const uploadMessage = {
+        id: Date.now().toString(),
+        content: userMessage ? `${userMessage}\n\n📎 Uploading ${file.name}...` : `📎 Uploading ${file.name}...`,
+        role: 'user',
+        language: 'en',
+        created_at: new Date().toISOString(),
+        isMediaUpload: true,
+      };
+      setMessages((prev) => [...prev, uploadMessage]);
+
+      // Create FormData
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const token = localStorage.getItem('token');
+
+      // Upload with progress tracking
+      const response = await axios.post(`${API}/media/upload`, formData, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'multipart/form-data',
+        },
+        onUploadProgress: (progressEvent) => {
+          const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(progress);
+        },
+      });
+
+      // Remove upload message and add analysis result
+      setMessages((prev) => prev.filter(msg => msg.id !== uploadMessage.id));
+
+      if (response.data.success) {
+        const analysis = response.data.analysis;
+
+        // Add user message showing what was uploaded
+        const userMessage = {
+          id: Date.now().toString(),
+          content: `📎 Uploaded ${file.name} for analysis`,
+          role: 'user',
+          language: 'en',
+          created_at: new Date().toISOString(),
+          isMediaUpload: true,
+        };
+
+        // Add analysis result message
+        const analysisMessage = {
+          id: Date.now().toString() + '-analysis',
+          content: formatAnalysisResult(analysis),
+          role: 'assistant',
+          language: 'en',
+          created_at: new Date().toISOString(),
+          isMediaAnalysis: true,
+          analysisData: analysis,
+        };
+
+        setMessages((prev) => [...prev, userMessage, analysisMessage]);
+
+        // Update conversation ID if it's a new conversation
+        if (!currentConversationId) {
+          // Generate a new conversation ID for media uploads
+          const newConversationId = `conv_${Date.now()}`;
+          setCurrentConversationId(newConversationId);
+          loadConversations();
+        }
+      }
+
+    } catch (err) {
+      console.error('Media upload failed:', err);
+
+      // Remove upload message and add error message
+      setMessages((prev) => prev.filter(msg => !msg.isMediaUpload));
+
+      const errorMessage = {
+        id: Date.now().toString() + '-error',
+        content: `❌ Failed to analyze ${file.name}. ${err.response?.data?.detail || 'Please try again.'}`,
+        role: 'assistant',
+        language: 'en',
+        created_at: new Date().toISOString(),
+        isError: true,
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+
+    } finally {
+      setIsUploadingMedia(false);
+      setUploadProgress(0);
+    }
+  };
+
+  const formatAnalysisResult = (analysis) => {
+    const { analysis_type, diagnosis, confidence_score, severity, treatment, cost_estimate, nearby_dealers } = analysis;
+
+    let result = `## 🔍 Analysis Results\n\n`;
+    result += `**Type:** ${analysis_type.charAt(0).toUpperCase() + analysis_type.slice(1).replace('_', ' ')}\n`;
+    result += `**Diagnosis:** ${diagnosis}\n`;
+    result += `**Confidence:** ${Math.round(confidence_score * 100)}%\n`;
+    result += `**Severity:** ${severity.toUpperCase()}\n\n`;
+
+    if (treatment) {
+      result += `## 💊 Treatment Recommendations\n${treatment}\n\n`;
+    }
+
+    if (cost_estimate > 0) {
+      result += `## 💰 Estimated Cost\n₹${cost_estimate.toFixed(2)}\n\n`;
+    }
+
+    if (nearby_dealers && nearby_dealers.length > 0) {
+      result += `## 🏪 Nearby Dealers\n`;
+      nearby_dealers.forEach((dealer, index) => {
+        result += `**${dealer.name}**\n`;
+        result += `📞 ${dealer.contact}\n`;
+        result += `📍 ${dealer.distance}\n`;
+        if (dealer.products && dealer.products.length > 0) {
+          result += `🛒 Products: ${dealer.products.join(', ')}\n`;
+        }
+        if (index < nearby_dealers.length - 1) result += '\n';
+      });
+    }
+
+    return result;
+  };
+
 
 
   if (loadingHistory) {
@@ -681,8 +825,15 @@ function ChatInterface({ user, onLogout }) {
       <div className={`chat-sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
         <div className="sidebar-header">
           <h3>{t.conversations}</h3>
+          {/* DEBUG: Testing if changes are picked up */}
           <button className="new-chat-button" onClick={handleNewChat} data-testid="new-chat-button">
             {t.newChat}
+          </button>
+          <button className="new-chat-button schemes-button" onClick={() => navigate('/schemes')} data-testid="schemes-button">
+            🌾 {t.schemesTitle}
+          </button>
+          <button className="new-chat-button market-button" onClick={() => navigate('/market')} data-testid="market-button">
+            🛒 {t.marketplaceTitle}
           </button>
         </div>
         <div className="conversation-list">
@@ -724,7 +875,7 @@ function ChatInterface({ user, onLogout }) {
       <div className="chat-main">
         <div className="chat-header">
           <div className="chat-header-left">
-            <button 
+            <button
               className="hamburger-menu"
               onClick={() => setSidebarOpen(!sidebarOpen)}
               title={sidebarOpen ? "Hide conversations" : "Show conversations"}
@@ -744,15 +895,15 @@ function ChatInterface({ user, onLogout }) {
           <div className="user-info">
             {/* Language Selector */}
             <div className="language-selector" ref={langSelectorRef}>
-              <button 
+              <button
                 className="lang-selector-button"
                 onClick={() => setLanguageSelectorOpen(!languageSelectorOpen)}
                 data-testid="language-selector"
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <circle cx="12" cy="12" r="10" strokeWidth="2"/>
-                  <line x1="2" y1="12" x2="22" y2="12" strokeWidth="2"/>
-                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" strokeWidth="2"/>
+                  <circle cx="12" cy="12" r="10" strokeWidth="2" />
+                  <line x1="2" y1="12" x2="22" y2="12" strokeWidth="2" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" strokeWidth="2" />
                 </svg>
                 <span className="lang-code">{uiLanguage.toUpperCase()}</span>
               </button>
@@ -775,7 +926,7 @@ function ChatInterface({ user, onLogout }) {
 
             {/* Profile Menu */}
             <div className="profile-menu" ref={profileMenuRef}>
-              <button 
+              <button
                 className="profile-button"
                 onClick={() => setProfileMenuOpen(!profileMenuOpen)}
                 data-testid="profile-button"
@@ -795,23 +946,23 @@ function ChatInterface({ user, onLogout }) {
                     </div>
                   </div>
                   <div className="profile-menu-items">
-                    <button 
-                      className="profile-menu-item" 
+                    <button
+                      className="profile-menu-item"
                       onClick={() => navigate('/account')}
                       data-testid="account-details"
                     >
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" strokeWidth="2"/>
-                        <circle cx="12" cy="7" r="4" strokeWidth="2"/>
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" strokeWidth="2" />
+                        <circle cx="12" cy="7" r="4" strokeWidth="2" />
                       </svg>
                       {t.accountDetails}
                     </button>
                     <div className="menu-divider"></div>
                     <button className="profile-menu-item logout" onClick={onLogout} data-testid="logout-menu-button">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" strokeWidth="2"/>
-                        <polyline points="16 17 21 12 16 7" strokeWidth="2"/>
-                        <line x1="21" y1="12" x2="9" y2="12" strokeWidth="2"/>
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" strokeWidth="2" />
+                        <polyline points="16 17 21 12 16 7" strokeWidth="2" />
+                        <line x1="21" y1="12" x2="9" y2="12" strokeWidth="2" />
                       </svg>
                       {t.logout}
                     </button>
@@ -864,7 +1015,7 @@ function ChatInterface({ user, onLogout }) {
                   </div>
                   <div className="message-content">
                     <div className="message-text">{message.content}</div>
-                    
+
                     {/* Voice Response Controls */}
                     {message.role === 'assistant' && message.audioFile && (
                       <div className="voice-response-controls">
@@ -884,7 +1035,7 @@ function ChatInterface({ user, onLogout }) {
                         )}
                       </div>
                     )}
-                    
+
                     <div className="message-meta">
                       <div className="tools-used">
                         {message.isVoice && (
@@ -938,13 +1089,13 @@ function ChatInterface({ user, onLogout }) {
               </div>
             </div>
           )}
-          
+
           {error && (
             <div className="error-banner">
               <div className="error-content">
                 <span className="error-icon">⚠️</span>
                 <span className="error-message">{error}</span>
-                <button 
+                <button
                   className="error-dismiss"
                   onClick={() => setError(null)}
                 >
@@ -953,7 +1104,7 @@ function ChatInterface({ user, onLogout }) {
               </div>
             </div>
           )}
-          
+
           {connectionStatus === 'disconnected' && (
             <div className="connection-banner">
               <div className="connection-content">
@@ -991,23 +1142,76 @@ function ChatInterface({ user, onLogout }) {
               </button>
             </div>
           )}
-          
+
           <form className="chat-input-container" onSubmit={handleSendMessage}>
+            {selectedFile && (
+              <div className="selected-file-preview">
+                <div className="file-info">
+                  <span className="file-icon">📎</span>
+                  <span className="file-name">{selectedFile.name}</span>
+                  <button 
+                    type="button" 
+                    className="remove-file-btn"
+                    onClick={() => setSelectedFile(null)}
+                    title="Remove file"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="input-wrapper">
+              {/* Media Attachment Button - Inside input on left */}
+              <button
+                type="button"
+                className={`media-button-inside ${isUploadingMedia ? 'uploading' : ''}`}
+                onClick={handleMediaButtonClick}
+                disabled={loading || isUploadingMedia}
+                title="Upload image or document for analysis"
+                data-testid="media-button"
+              >
+                {isUploadingMedia ? (
+                  <div className="upload-progress">
+                    <svg width="16" height="16" viewBox="0 0 24 24" className="upload-spinner">
+                      <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="31.416" strokeDashoffset={31.416 * (1 - uploadProgress / 100)} strokeLinecap="round" transform="rotate(-90 12 12)" />
+                    </svg>
+                    <span className="progress-text">{uploadProgress}%</span>
+                  </div>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 16.2a2 2 0 0 1-2.83-2.83l8.49-8.49" />
+                  </svg>
+                )}
+              </button>
+
               <textarea
                 ref={textareaRef}
                 className="chat-input"
                 value={inputMessage}
                 onChange={(e) => setInputMessage(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={voiceSupported ? `${t.inputPlaceholder} or click 🎤 to speak` : t.inputPlaceholder}
+                placeholder={selectedFile ? "Add a message about your file..." : (voiceSupported ? `${t.inputPlaceholder} or tap 🎤 to speak` : t.inputPlaceholder)}
                 rows="1"
                 disabled={loading}
                 data-testid="chat-input"
-                style={{ paddingRight: voiceSupported ? '80px' : '50px' }}
+                style={{
+                  paddingLeft: '50px', // Space for media button
+                  paddingRight: voiceSupported ? '120px' : '90px'
+                }}
               />
-              
+
               <div className="input-buttons">
+
+                {/* Hidden file input */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,application/pdf"
+                  onChange={handleFileSelect}
+                  style={{ display: 'none' }}
+                  data-testid="file-input"
+                />
+
                 {voiceSupported && (
                   <button
                     type="button"
@@ -1022,11 +1226,11 @@ function ChatInterface({ user, onLogout }) {
                     }}
                     disabled={loading}
                     title={
-                      !navigator.onLine 
+                      !navigator.onLine
                         ? 'Offline - Recording will be processed when online'
-                        : isRecording 
-                        ? 'Tap to stop recording' 
-                        : 'Tap and speak'
+                        : isRecording
+                          ? 'Tap to stop recording'
+                          : 'Tap and speak'
                     }
                     data-testid="voice-button"
                   >
@@ -1045,13 +1249,13 @@ function ChatInterface({ user, onLogout }) {
                     {!navigator.onLine && (
                       <div className="offline-indicator">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
                         </svg>
                       </div>
                     )}
                   </button>
                 )}
-                
+
                 <button
                   type="submit"
                   className="send-button"

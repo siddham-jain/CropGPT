@@ -18,6 +18,12 @@
 
 ## 🚀 Revolutionary Features
 
+### 🎨 **Modern Authentication Experience**
+- **Impact metrics showcase** on login screen: 20 tonnes waste prevented, 1 lakh+ farmers helped, ₹185 crores subsidy allotment
+- **Two-column layout** with animated metric cards and smooth hover effects
+- **Fully responsive** design that adapts to mobile and desktop
+- **Clean, modern UI** with gradient effects and professional presentation
+
 ### ⚡ **Lightning-Fast AI Responses**
 - **Sub-second responses** powered by Cerebras inference (avg 1.2s vs 24 hours traditional)
 - **34,560x faster** than traditional agricultural advisory systems

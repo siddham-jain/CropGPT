@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -29,9 +29,12 @@ from models import User, ChatMessage, Conversation
 from cultural_context import CulturalContextManager
 from conversational_memory import ConversationalMemory, FarmProfile
 from agricultural_rag import AgriculturalRAG
-from voice_interface import VoiceInterface
+from voice_stt_service import VoiceSTTService
 from workflow_engine import WorkflowEngine
 from metrics_system import MetricsSystem
+from media_analysis import MediaAnalysisService, MediaAnalysis
+from schemes_database import schemes_db
+from marketplace_database import marketplace_db
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -60,6 +63,7 @@ CEREBRAS_API_KEY = os.environ.get('CEREBRAS_API_KEY')
 MCP_GATEWAY_URL = os.environ.get('MCP_GATEWAY_URL', 'http://165.232.190.215:8811')
 MCP_GATEWAY_TOKEN = os.environ.get('MCP_GATEWAY_TOKEN')  # Bearer token for MCP Gateway
 EXA_API_KEY = os.environ.get('EXA_API_KEY')
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 
 # Performance optimizations
 # Enhanced caching system with multiple layers
@@ -120,7 +124,8 @@ try:
     redis_client.ping()  # Test connection
     logger.info("Redis connected successfully")
 except Exception as e:
-    logger.warning(f"Redis not available, using in-memory cache only: {e}")
+    logger.info(f"Redis not available, using in-memory cache only: {e}")
+    redis_client = None
 
 # ==================== Error Messages ====================
 
@@ -170,7 +175,7 @@ async def get_cached_response(cache_key: str) -> Optional[Dict[str, Any]]:
         
         return response_cache.get(cache_key)
     except Exception as e:
-        logger.warning(f"Cache retrieval error: {e}")
+        logger.debug(f"Cache retrieval error: {e}")
         return None
 
 async def set_cached_response(cache_key: str, response: Dict[str, Any], ttl: int = 300):
@@ -181,7 +186,7 @@ async def set_cached_response(cache_key: str, response: Dict[str, Any], ttl: int
         
         response_cache[cache_key] = response
     except Exception as e:
-        logger.warning(f"Cache storage error: {e}")
+        logger.debug(f"Cache storage error: {e}")
 
 def create_cache_key(user_id: str, message: str, language: str = "en") -> str:
     """Create a cache key for responses"""
@@ -202,7 +207,7 @@ async def get_conversation_from_cache(conversation_id: str, user_id: str) -> Opt
         
         return conversation_cache.get(cache_key)
     except Exception as e:
-        logger.warning(f"Conversation cache error: {e}")
+        logger.debug(f"Conversation cache error: {e}")
         return None
 
 async def cache_conversation(conversation_id: str, user_id: str, messages: List[Dict]):
@@ -214,7 +219,7 @@ async def cache_conversation(conversation_id: str, user_id: str, messages: List[
         
         conversation_cache[cache_key] = messages
     except Exception as e:
-        logger.warning(f"Conversation cache storage error: {e}")
+        logger.debug(f"Conversation cache storage error: {e}")
 
 # ==================== Models ====================
 
@@ -508,9 +513,12 @@ class CerebrasService:
 try:
     mcp_client = MCPGatewayClient(MCP_GATEWAY_URL, MCP_GATEWAY_TOKEN)
     cerebras_service = CerebrasService(CEREBRAS_API_KEY)
+    media_analysis_service = MediaAnalysisService(OPENROUTER_API_KEY) if OPENROUTER_API_KEY else None
     logger.info(f"Initialized MCP Gateway client for: {MCP_GATEWAY_URL}")
     if MCP_GATEWAY_TOKEN:
         logger.info("MCP Gateway authentication token configured")
+    if media_analysis_service:
+        logger.info("Media analysis service initialized with OpenRouter API")
 except Exception as e:
     logger.error(f"Failed to initialize services: {e}")
     raise
@@ -532,10 +540,10 @@ class AgenticChatService:
         self.conversational_memory = ConversationalMemory()
         # Agricultural RAG system for domain knowledge
         self.agricultural_rag = AgriculturalRAG()
-        # Voice interface for multilingual speech processing
-        self.voice_interface = VoiceInterface()
+        # Voice STT service for speech-to-text
+        self.voice_stt_service = VoiceSTTService()
         # Workflow engine for agricultural process automation
-        self.workflow_engine = WorkflowEngine(database, mcp_client, self.voice_interface)
+        self.workflow_engine = WorkflowEngine(database, mcp_client, None)
         # Metrics system for performance and impact tracking
         self.metrics_system = MetricsSystem(database)
     
@@ -1336,8 +1344,11 @@ async def save_chat_messages_async(user_id: str, conversation_id: str, user_mess
         
         # Invalidate conversation cache
         cache_key = f"conv:{conversation_id}:{user_id}"
-        if redis_client:
-            redis_client.delete(cache_key)
+        try:
+            if redis_client:
+                redis_client.delete(cache_key)
+        except Exception as e:
+            logger.debug(f"Redis cache deletion error: {e}")
         conversation_cache.pop(cache_key, None)
         
     except Exception as e:
@@ -1345,28 +1356,19 @@ async def save_chat_messages_async(user_id: str, conversation_id: str, user_mess
         
         raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.post("/voice/chat", response_model=VoiceResponse)
-async def voice_chat(request: VoiceRequest, current_user: Dict = Depends(get_current_user)):
-    """Process voice input and return voice response with performance optimizations"""
-    
+
+@api_router.post("/voice/transcribe")
+async def transcribe_audio(
+    request: VoiceRequest,
+    current_user: Dict = Depends(get_current_user)
+):
+    """
+    Transcribe audio using Deepgram Nova-2 STT
+    Returns only the transcribed text (no AI response)
+    """
     try:
-        import tempfile
         import base64
-        import hashlib
-        
         start_time = time.time()
-        
-        # Create cache key for voice processing
-        audio_hash = hashlib.md5(request.audio_data.encode()).hexdigest()
-        voice_cache_key = f"voice:{audio_hash}:{request.language or 'auto'}"
-        
-        # Check voice cache first
-        cached_voice = voice_cache.get(voice_cache_key)
-        if cached_voice:
-            logger.info(f"Voice cache hit for user {current_user['user_id']}")
-            duration = time.time() - start_time
-            record_request_time(duration)
-            return VoiceResponse(**cached_voice)
         
         # Decode audio data
         try:
@@ -1374,230 +1376,29 @@ async def voice_chat(request: VoiceRequest, current_user: Dict = Depends(get_cur
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid audio data: {e}")
         
-        # Use async file operations for better performance
-        temp_audio_path = None
-        try:
-            # Create temporary file asynchronously
-            import aiofiles.tempfile
-            async with aiofiles.tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
-                await temp_audio.write(audio_bytes)
-                temp_audio_path = temp_audio.name
-            
-            # Process voice input with timeout for performance
-            voice_task = asyncio.create_task(
-                agentic_service.voice_interface.process_voice_query(
-                    temp_audio_path, request.language
-                )
-            )
-            
-            try:
-                voice_result = await asyncio.wait_for(voice_task, timeout=10.0)  # 10 second timeout
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=408, detail="Voice processing timeout")
-            
-            if not voice_result["success"]:
-                raise HTTPException(status_code=400, detail=voice_result["error"])
-            
-            # Get conversation context efficiently
-            conversation_id = request.conversation_id or str(uuid.uuid4())
-            
-            # Use cached conversation history
-            conversation_history = await get_conversation_from_cache(conversation_id, current_user["user_id"])
-            
-            if not conversation_history and conversation_id:
-                # Optimized database query
-                messages = await db.chat_messages.find(
-                    {"conversation_id": conversation_id, "user_id": current_user["user_id"]},
-                    {"content": 1, "role": 1, "_id": 0}
-                ).sort("created_at", -1).limit(8).to_list(8)  # Reduced limit for voice
-                
-                conversation_history = [
-                    {"role": msg["role"], "content": msg["content"]}
-                    for msg in reversed(messages)
-                ]
-                
-                # Cache for future use
-                await cache_conversation(conversation_id, current_user["user_id"], conversation_history)
-            
-            # Get farm profile and context in parallel
-            context_task = asyncio.create_task(
-                agentic_service.conversational_memory.get_conversation_context(
-                    conversation_id, current_user["user_id"]
-                )
-            )
-            profile_task = asyncio.create_task(
-                agentic_service.conversational_memory.get_farm_profile(
-                    current_user["user_id"]
-                )
-            )
-            
-            conversation_context, farm_profile = await asyncio.gather(context_task, profile_task)
-            
-            # Process the recognized text
-            ai_result = await agentic_service.process_message(
-                voice_result["text"], 
-                conversation_history or [],
-                conversation_context,
-                farm_profile
-            )
-            
-            # Generate voice response with timeout
-            voice_response_task = asyncio.create_task(
-                agentic_service.voice_interface.create_voice_response(
-                    ai_result["message"], voice_result["language"]
-                )
-            )
-            
-            try:
-                voice_response = await asyncio.wait_for(voice_response_task, timeout=15.0)
-            except asyncio.TimeoutError:
-                # Fallback to text response if voice generation times out
-                voice_response = {
-                    "success": True,
-                    "audio_data": None,
-                    "text": ai_result["message"]
-                }
-            
-            # Prepare response
-            response_data = {
-                "text_response": ai_result["message"],
-                "audio_response": voice_response.get("audio_data"),
-                "language": voice_result["language"],
-                "conversation_id": conversation_id,
-                "tools_used": ai_result.get("tools_used", []),
-                "processing_time": time.time() - start_time
-            }
-            
-            # Cache successful voice responses
-            if voice_response.get("success"):
-                voice_cache[voice_cache_key] = response_data
-            
-            # Save to database asynchronously
-            asyncio.create_task(save_voice_messages_async(
-                current_user["user_id"], conversation_id, voice_result, ai_result
-            ))
-            
-            # Update conversational memory asynchronously
-            asyncio.create_task(update_voice_memory_async(
-                conversation_id, current_user["user_id"], voice_result["text"], ai_result["message"]
-            ))
-            
-            # Record metrics
-            duration = time.time() - start_time
-            record_request_time(duration)
-            
-            await agentic_service.metrics_system.record_request_metrics(
-                start_time, "voice", voice_result["language"], True
-            )
-            
-            return VoiceResponse(**response_data)
-            
-        finally:
-            # Clean up temporary file
-            if temp_audio_path and os.path.exists(temp_audio_path):
-                try:
-                    os.unlink(temp_audio_path)
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup temp file: {e}")
-    
+        # Transcribe using Deepgram Nova-2
+        result = await agentic_service.voice_stt_service.transcribe_audio(
+            audio_bytes,
+            language=request.language or "en"
+        )
+        
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result.get("error", "Transcription failed"))
+        
+        processing_time = time.time() - start_time
+        
+        return {
+            "success": True,
+            "text": result["text"],
+            "confidence": result["confidence"],
+            "language": result["language"],
+            "processing_time": processing_time
+        }
+        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in voice chat: {e}")
-        duration = time.time() - start_time
-        record_request_time(duration)
-        
-        await agentic_service.metrics_system.record_request_metrics(
-            start_time, "voice", "en", False
-        )
-        
-        # Get language for error message
-        error_language = request.language or "en"
-        error_msg = get_error_message("voice_processing_error", error_language)
-        
-        raise HTTPException(
-            status_code=500, 
-            detail={
-                "error": "voice_processing_error",
-                "message": error_msg,
-                "language": error_language,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-        )
-
-async def save_voice_messages_async(user_id: str, conversation_id: str, voice_result: Dict, ai_result: Dict):
-    """Save voice messages asynchronously"""
-    try:
-        now = datetime.now(timezone.utc)
-        
-        user_message = ChatMessage(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            conversation_id=conversation_id,
-            content=voice_result["text"],
-            role="user",
-            language=voice_result["language"],
-            tools_used=[],
-            created_at=now
-        )
-        
-        ai_message = ChatMessage(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            conversation_id=conversation_id,
-            content=ai_result["message"],
-            role="assistant",
-            language=voice_result["language"],
-            tools_used=ai_result.get("tools_used", []),
-            created_at=now
-        )
-        
-        # Batch insert
-        await db.chat_messages.insert_many([
-            user_message.dict(), ai_message.dict()
-        ])
-        
-    except Exception as e:
-        logger.error(f"Error saving voice messages: {e}")
-
-async def update_voice_memory_async(conversation_id: str, user_id: str, user_text: str, ai_text: str):
-    """Update conversational memory asynchronously"""
-    try:
-        await agentic_service.conversational_memory.update_conversation_context(
-            conversation_id, user_id, "user", user_text
-        )
-        await agentic_service.conversational_memory.update_conversation_context(
-            conversation_id, user_id, "assistant", ai_text
-        )
-    except Exception as e:
-        logger.error(f"Error updating voice memory: {e}")
-
-@api_router.post("/voice/text-to-speech")
-async def text_to_speech(
-    text: str, 
-    language: str = "en",
-    current_user: Dict = Depends(get_current_user)
-):
-    """Convert text to speech"""
-    
-    try:
-        result = await agentic_service.voice_interface.text_to_speech(text, language)
-        
-        if result["success"]:
-            # Return audio file path or base64 encoded audio
-            return {
-                "success": True,
-                "audio_file": result["audio_file"],
-                "duration": result["duration"],
-                "language": language
-            }
-        else:
-            raise HTTPException(status_code=500, detail=result["error"])
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in text-to-speech: {e}")
+        logger.error(f"Error in audio transcription: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.get("/voice/capabilities")
@@ -1605,11 +1406,348 @@ async def get_voice_capabilities():
     """Get voice processing capabilities"""
     
     try:
-        capabilities = agentic_service.voice_interface.get_voice_capabilities()
-        return capabilities
+        if not agentic_service.voice_stt_service.is_available():
+            return {
+                "available": False,
+                "error": "Deepgram API key not configured"
+            }
+        
+        return {
+            "available": True,
+            "model": "nova-2",
+            "provider": "Deepgram",
+            "supported_languages": agentic_service.voice_stt_service.get_supported_languages(),
+            "features": ["smart_format", "punctuation", "multilingual"]
+        }
         
     except Exception as e:
         logger.error(f"Error getting voice capabilities: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== Media Attachment Endpoints ====================
+
+@api_router.post("/media/upload")
+async def upload_media(
+    file: UploadFile = File(...),
+    current_user: Dict = Depends(get_current_user)
+):
+    """Upload and analyze media files (images/documents)"""
+    
+    if not media_analysis_service:
+        raise HTTPException(
+            status_code=503, 
+            detail="Media analysis service not available. Please configure OPENROUTER_API_KEY."
+        )
+    
+    try:
+        start_time = time.time()
+        
+        # Read file data
+        file_data = await file.read()
+        
+        # Validate file
+        validation = media_analysis_service.validate_file(file_data, file.filename)
+        if not validation['valid']:
+            raise HTTPException(status_code=400, detail=validation['error'])
+        
+        # Analyze based on file type
+        if validation['file_type'] == 'image':
+            analysis = await media_analysis_service.analyze_image(
+                file_data, file.filename, current_user['user_id']
+            )
+        else:  # document
+            analysis = await media_analysis_service.analyze_document(
+                file_data, file.filename, current_user['user_id']
+            )
+        
+        # Save analysis to database
+        await db.media_analyses.insert_one(analysis.dict())
+        
+        # Record processing time
+        processing_time = time.time() - start_time
+        record_request_time(processing_time)
+        
+        return {
+            "success": True,
+            "analysis": analysis.dict(),
+            "processing_time": processing_time
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in media upload: {e}")
+        raise HTTPException(status_code=500, detail=f"Media analysis failed: {str(e)}")
+
+@api_router.get("/media/history")
+async def get_media_history(
+    limit: int = 10,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get user's media analysis history"""
+    
+    try:
+        analyses = await db.media_analyses.find(
+            {"user_id": current_user["user_id"]},
+            {"_id": 0}
+        ).sort("created_at", -1).limit(limit).to_list(limit)
+        
+        return {"analyses": analyses}
+        
+    except Exception as e:
+        logger.error(f"Error getting media history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/media/supported-formats")
+async def get_supported_formats():
+    """Get supported file formats and size limits"""
+    
+    return {
+        "image_formats": ["jpeg", "jpg", "png", "webp", "heic"],
+        "document_formats": ["pdf"],
+        "max_image_size_mb": 10,
+        "max_document_size_mb": 5
+    }
+
+# ==================== Schemes & Subsidies Endpoints ====================
+
+class FarmerDetailsRequest(BaseModel):
+    state: str
+    district: str
+    landSize: float
+    cropTypes: List[str]
+
+@api_router.post("/schemes/find")
+async def find_schemes(
+    farmer_details: FarmerDetailsRequest,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Find matching schemes based on farmer details"""
+    try:
+        # Convert to dict for processing
+        farmer_data = farmer_details.dict()
+        
+        # Find matching schemes
+        matching_schemes = schemes_db.find_matching_schemes(farmer_data)
+        
+        # Get enrollment status for each scheme
+        user_id = current_user["user_id"]
+        for scheme in matching_schemes:
+            enrollment_status = schemes_db.generate_mock_enrollment_status(user_id, scheme["id"])
+            scheme["enrollment_status"] = enrollment_status
+        
+        return {
+            "success": True,
+            "schemes": matching_schemes,
+            "total_found": len(matching_schemes)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error finding schemes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/schemes/enrollment/{user_id}")
+async def get_enrollment_status(
+    user_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get mock enrollment status for all schemes"""
+    try:
+        # Verify user can access this data (either own data or admin)
+        if user_id != current_user["user_id"]:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        enrollment_summary = schemes_db.get_user_enrollment_summary(user_id)
+        
+        return {
+            "success": True,
+            "enrollment_summary": enrollment_summary
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting enrollment status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/schemes/all")
+async def get_all_schemes(current_user: Dict = Depends(get_current_user)):
+    """Get all available schemes"""
+    try:
+        all_schemes = schemes_db.get_all_schemes()
+        
+        return {
+            "success": True,
+            "schemes": all_schemes,
+            "total_schemes": len(all_schemes)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting all schemes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/schemes/{scheme_id}")
+async def get_scheme_details(
+    scheme_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get detailed information about a specific scheme"""
+    try:
+        scheme = schemes_db.schemes.get(scheme_id)
+        if not scheme:
+            raise HTTPException(status_code=404, detail="Scheme not found")
+        
+        # Add enrollment status for current user
+        user_id = current_user["user_id"]
+        enrollment_status = schemes_db.generate_mock_enrollment_status(user_id, scheme_id)
+        scheme_with_status = scheme.copy()
+        scheme_with_status["enrollment_status"] = enrollment_status
+        
+        return {
+            "success": True,
+            "scheme": scheme_with_status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting scheme details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== Surplus Marketplace Endpoints ====================
+
+class SurplusListingRequest(BaseModel):
+    cropType: str
+    quantity: float
+    pricePerUnit: float
+    readyDate: str
+    qualityGrade: str
+    description: Optional[str] = ""
+
+class ListingUpdateRequest(BaseModel):
+    cropType: Optional[str] = None
+    quantity: Optional[float] = None
+    pricePerUnit: Optional[float] = None
+    readyDate: Optional[str] = None
+    qualityGrade: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+
+@api_router.post("/surplus/create")
+async def create_surplus_listing(
+    listing_data: SurplusListingRequest,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Create a new surplus listing"""
+    try:
+        user_id = current_user["user_id"]
+        
+        # Create listing
+        listing = marketplace_db.create_listing(user_id, listing_data.dict())
+        
+        return {
+            "success": True,
+            "listing": listing,
+            "message": "Surplus listing created successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating surplus listing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/surplus/user/{user_id}")
+async def get_user_surplus_listings(
+    user_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get all surplus listings for a user"""
+    try:
+        # Verify user can access this data
+        if user_id != current_user["user_id"]:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        listings = marketplace_db.get_user_listings(user_id)
+        
+        return {
+            "success": True,
+            "listings": listings,
+            "total_listings": len(listings)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user listings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.put("/surplus/{listing_id}")
+async def update_surplus_listing(
+    listing_id: str,
+    updates: ListingUpdateRequest,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Update a surplus listing"""
+    try:
+        user_id = current_user["user_id"]
+        
+        # Filter out None values
+        update_data = {k: v for k, v in updates.dict().items() if v is not None}
+        
+        updated_listing = marketplace_db.update_listing(listing_id, user_id, update_data)
+        
+        if not updated_listing:
+            raise HTTPException(status_code=404, detail="Listing not found or access denied")
+        
+        return {
+            "success": True,
+            "listing": updated_listing,
+            "message": "Listing updated successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating listing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.delete("/surplus/{listing_id}")
+async def delete_surplus_listing(
+    listing_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Delete a surplus listing"""
+    try:
+        user_id = current_user["user_id"]
+        
+        success = marketplace_db.delete_listing(listing_id, user_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Listing not found or access denied")
+        
+        return {
+            "success": True,
+            "message": "Listing deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting listing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/surplus/stats")
+async def get_marketplace_stats(current_user: Dict = Depends(get_current_user)):
+    """Get marketplace statistics"""
+    try:
+        stats = marketplace_db.get_marketplace_stats()
+        
+        return {
+            "success": True,
+            "stats": stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting marketplace stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== Workflow Automation Endpoints ====================

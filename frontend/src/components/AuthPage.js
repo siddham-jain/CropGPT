@@ -37,82 +37,108 @@ function AuthPage({ onLogin }) {
 
   return (
     <div className="auth-page">
-      <div className="auth-container">
-        <div className="auth-logo">
-          <h1>🌾 Farmer Chatbot</h1>
-          <p>Your AI-powered agricultural assistant</p>
-        </div>
-
-        <div className="auth-tabs">
-          <button
-            className={`auth-tab ${activeTab === 'login' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveTab('login');
-              setError('');
-            }}
-            data-testid="login-tab"
-          >
-            Login
-          </button>
-          <button
-            className={`auth-tab ${activeTab === 'register' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveTab('register');
-              setError('');
-            }}
-            data-testid="register-tab"
-          >
-            Sign Up
-          </button>
-        </div>
-
-        <form className="auth-form" onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label htmlFor="email">Email</label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="your@email.com"
-              required
-              data-testid="email-input"
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-              minLength={6}
-              data-testid="password-input"
-            />
-          </div>
-
-          {error && (
-            <div className="error-message" data-testid="error-message">
-              {error}
+      <div className="auth-layout">
+        {/* Left Column - Metrics */}
+        <div className="auth-metrics-column">
+          <div className="metrics-container">
+            <div className="metric-box">
+              <div className="metric-icon">♻️</div>
+              <div className="metric-value">20 Tonnes</div>
+              <div className="metric-label">Waste Prevented</div>
             </div>
-          )}
+            <div className="metric-box">
+              <div className="metric-icon">👨‍🌾</div>
+              <div className="metric-value">1,00,000+</div>
+              <div className="metric-label">Farmers Helped</div>
+            </div>
+            <div className="metric-box">
+              <div className="metric-icon">💰</div>
+              <div className="metric-value">₹185 Crores</div>
+              <div className="metric-label">Subsidy Allotment</div>
+            </div>
+          </div>
+        </div>
 
-          <button
-            type="submit"
-            className="auth-button"
-            disabled={loading}
-            data-testid="auth-submit-button"
-          >
-            {loading
-              ? 'Please wait...'
-              : activeTab === 'login'
-              ? 'Login'
-              : 'Create Account'}
-          </button>
-        </form>
+        {/* Right Column - Auth Form */}
+        <div className="auth-form-column">
+          <div className="auth-container">
+            <div className="auth-logo">
+              <h1>🌾 Farmer Chatbot</h1>
+              <p>Your AI-powered agricultural assistant</p>
+            </div>
+
+            <div className="auth-tabs">
+              <button
+                className={`auth-tab ${activeTab === 'login' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveTab('login');
+                  setError('');
+                }}
+                data-testid="login-tab"
+              >
+                Login
+              </button>
+              <button
+                className={`auth-tab ${activeTab === 'register' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveTab('register');
+                  setError('');
+                }}
+                data-testid="register-tab"
+              >
+                Sign Up
+              </button>
+            </div>
+
+            <form className="auth-form" onSubmit={handleSubmit}>
+              <div className="form-group">
+                <label htmlFor="email">Email</label>
+                <input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="your@email.com"
+                  required
+                  data-testid="email-input"
+                />
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="password">Password</label>
+                <input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  minLength={6}
+                  data-testid="password-input"
+                />
+              </div>
+
+              {error && (
+                <div className="error-message" data-testid="error-message">
+                  {error}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="auth-button"
+                disabled={loading}
+                data-testid="auth-submit-button"
+              >
+                {loading
+                  ? 'Please wait...'
+                  : activeTab === 'login'
+                  ? 'Login'
+                  : 'Create Account'}
+              </button>
+            </form>
+          </div>
+        </div>
       </div>
     </div>
   );
